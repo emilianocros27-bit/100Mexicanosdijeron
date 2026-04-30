@@ -546,6 +546,13 @@ window.addEventListener('DOMContentLoaded', () => {
 });
 
 /* ══ LOGIN ══ */
+// BUG 5 FIX: hash simple de contraseña (no reversible)
+function hashPass(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
+  return h.toString(36);
+}
+
 function switchTab(mode) {
   loginMode = mode;
   document.getElementById('tabLogin').classList.toggle('active', mode === 'login');
@@ -568,14 +575,14 @@ function doLogin() {
 
   if (loginMode === 'register') {
     if (users[user]) { err.textContent = 'Ese usuario ya existe'; return; }
-    users[user] = { pass, preguntas: [] };
+    users[user] = { pass: hashPass(pass), preguntas: [] };
     localStorage.setItem('100mx_users', JSON.stringify(users));
     err.style.color = 'var(--verde)';
     err.textContent = '¡Cuenta creada! Entrando…';
     setTimeout(() => { err.style.color = ''; currentUser = user; finishLogin(); }, 900);
   } else {
     if (!users[user]) { err.textContent = 'Usuario no encontrado'; return; }
-    if (users[user].pass !== pass) { err.textContent = 'Contraseña incorrecta'; return; }
+    if (users[user].pass !== hashPass(pass)) { err.textContent = 'Contraseña incorrecta'; return; }
     currentUser = user;
     finishLogin();
   }
@@ -627,6 +634,10 @@ function loadUserQuestions() {
   renderEditor();
 }
 
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
 /* ══ EDITOR ══ */
 function addQuestion() {
   qs.push({ id: Date.now(), pregunta:'', respuestas: Array(6).fill(null).map(()=>({texto:'',puntos:''})) });
@@ -653,7 +664,7 @@ function renderEditor() {
       <textarea class="inp-pregunta" rows="2"
         placeholder="Escribe tu pregunta aquí…"
         oninput="qs[${qi}].pregunta=this.value"
-      >${q.pregunta}</textarea>
+      >${escHtml(q.pregunta)}</textarea>
       <div class="resp-list">
         ${q.respuestas.map((r,ri) => `
           <div>
@@ -661,7 +672,7 @@ function renderEditor() {
               <div class="resp-num">${ri+1}</div>
               <input class="inp-resp" type="text"
                 placeholder="Respuesta ${ri+1}"
-                value="${r.texto}"
+                value="${escHtml(r.texto)}"
                 oninput="qs[${qi}].respuestas[${ri}].texto=this.value"
               />
               <input class="inp-pts" type="number" min="1" max="99"
@@ -745,77 +756,107 @@ function normalize(s) {
     .replace(/\s+/g, ' ');
 }
 
-function similarity(a, b) {
-  // Coincidencia exacta o por palabras completas
-  if (a === b) return true;
-  // Las palabras del input deben matchear palabras completas de la respuesta
-  const wordsA = a.split(' ').filter(w => w.length > 1);
-  const wordsB = b.split(' ');
-  // Todas las palabras del input deben estar en la respuesta como palabra completa
-  return wordsA.length > 0 && wordsA.every(w => wordsB.includes(w));
+// BUG 2 FIX: solo checar si las palabras del typed están en la respuesta, no al revés
+function isMatch(typed, respuesta) {
+  if (typed === respuesta) return true;
+  const wordsTyped = typed.split(' ').filter(w => w.length > 1);
+  const wordsResp  = respuesta.split(' ');
+  // Todas las palabras escritas deben ser palabras completas de la respuesta
+  return wordsTyped.length > 0 && wordsTyped.every(w => wordsResp.includes(w));
 }
 
+// BUG 1 FIX: checkAnswer en tiempo real solo para feedback visual, NO revela automáticamente
+// La revelación real siempre pasa por submitAnswer con su cooldown
 function checkAnswer(val) {
   const inp = document.getElementById('answerInput');
   if (inp.disabled || !window._pqs) return;
   inp.classList.remove('hit');
+  // Solo highlight visual si hay coincidencia, sin revelar
   if (!val.trim() || normalize(val).length < 3) return;
-
   const typed = normalize(val);
   const q = window._pqs[cq];
-
   for (let i = 0; i < q.respuestas.length; i++) {
     const rn = normalize(q.respuestas[i].texto);
-    if (similarity(typed, rn) || similarity(rn, typed)) {
-      const row = document.getElementById(`ar${i}`);
-      if (row && !row.classList.contains('revealed')) {
-        row.classList.add('revealed');
-        inp.classList.add('hit');
-        flash('ok');
-        setTimeout(() => { inp.value = ''; inp.classList.remove('hit'); }, 700);
-        return;
-      }
+    const row = document.getElementById(`ar${i}`);
+    if (isMatch(typed, rn) && row && !row.classList.contains('revealed')) {
+      inp.style.borderColor = 'var(--verde)';
+      return;
     }
   }
+  inp.style.borderColor = '';
 }
 
 function submitAnswer() {
   const inp = document.getElementById('answerInput');
   if (inp.disabled || !inp.value.trim() || !window._pqs) return;
 
+  inp.style.borderColor = '';
   const typed = normalize(inp.value);
   const q = window._pqs[cq];
   let matched = false;
   let matchedIndex = -1;
+  let alreadyRevealed = false;
 
   for (let i = 0; i < q.respuestas.length; i++) {
-    const rn = normalize(q.respuestas[i].texto);
-    if (similarity(typed, rn) || similarity(rn, typed)) {
-      const row = document.getElementById(`ar${i}`);
-      if (row && !row.classList.contains('revealed')) {
+    const rn  = normalize(q.respuestas[i].texto);
+    const row = document.getElementById(`ar${i}`);
+    if (isMatch(typed, rn)) {
+      if (row && row.classList.contains('revealed')) {
+        alreadyRevealed = true; // BUG 6 FIX
+      } else if (row) {
         matched = true;
         matchedIndex = i;
-        break;
       }
+      break;
     }
   }
 
+  // BUG 3 FIX: bloquear navegación durante cooldown
+  document.getElementById('btnPrev').disabled = true;
+  document.getElementById('btnNext').disabled = true;
   inp.disabled = true;
   inp.classList.add('waiting');
+
   setTimeout(() => {
     inp.classList.remove('waiting');
-    if (matched) {
+
+    if (alreadyRevealed) {
+      // Ya fue revelada — aviso sutil, no cuenta como error
+      inp.classList.add('miss');
+      inp.placeholder = '¡Esa ya fue revelada!';
+      setTimeout(() => {
+        inp.value = ''; inp.classList.remove('miss');
+        inp.placeholder = 'Escribe la respuesta del participante…';
+        inp.disabled = false; inp.focus();
+        restoreNav();
+      }, 700);
+    } else if (matched) {
       inp.classList.add('hit');
       const row = document.getElementById(`ar${matchedIndex}`);
       if (row) row.classList.add('revealed');
       flash('ok');
-      setTimeout(() => { inp.value = ''; inp.classList.remove('hit'); inp.disabled = false; inp.focus(); }, 700);
+      setTimeout(() => {
+        inp.value = ''; inp.classList.remove('hit');
+        inp.disabled = false; inp.focus();
+        restoreNav();
+      }, 700);
     } else {
       inp.classList.add('miss');
       flash('x');
-      setTimeout(() => { inp.value = ''; inp.classList.remove('miss'); inp.disabled = false; inp.focus(); }, 700);
+      setTimeout(() => {
+        inp.value = ''; inp.classList.remove('miss');
+        inp.disabled = false; inp.focus();
+        restoreNav();
+      }, 700);
     }
   }, 1500);
+}
+
+// BUG 3 FIX helper: restaurar botones de nav según posición actual
+function restoreNav() {
+  if (!window._pqs) return;
+  document.getElementById('btnPrev').disabled = (cq === 0);
+  document.getElementById('btnNext').disabled = (cq === window._pqs.length - 1);
 }
 
 /* ══ FLASH ══ */
@@ -843,6 +884,9 @@ function nextQ() {
 function prevQ() { if (cq <= 0) return; cq--; loadQ(); }
 
 function goBack() {
+  // BUG 4 FIX: limpiar estado al volver al editor
+  window._pqs = null;
+  cq = 0;
   document.getElementById('oEnd').classList.remove('show');
   document.getElementById('sGame').style.display   = 'none';
   document.getElementById('sEditor').style.display = 'block';
